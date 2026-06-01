@@ -269,6 +269,27 @@
     }
     .photo-label-btn:hover { border-color: var(--pink); }
     #photo-input { display: none; }
+    .photo-warning {
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: #fff8e6;
+      border: 1.5px solid #f5c842;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #7a5800;
+      line-height: 1.6;
+      display: none;
+    }
+    .photo-warning.show { display: block; }
+    .save-error {
+      text-align: center;
+      color: #d93b3b;
+      font-size: 13px;
+      margin-top: 10px;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .save-error.show { opacity: 1; }
 
     .btn-save {
       width: 100%;
@@ -529,9 +550,10 @@
         </div>
         <label for="photo-input" class="photo-label-btn">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="3" width="16" height="12" rx="2" stroke="#7a6e63" stroke-width="1.2"/><circle cx="9" cy="9" r="2.5" stroke="#7a6e63" stroke-width="1.1"/><path d="M5.5 3L6.5 1.5H11.5L12.5 3" stroke="#7a6e63" stroke-width="1" stroke-linecap="round"/></svg>
-          写真を選ぶ（または撮影）
+          写真を選ぶ（ライブラリまたは撮影）
         </label>
-        <input type="file" id="photo-input" accept="image/*" capture="environment" onchange="handlePhotoSelect(this)" />
+        <input type="file" id="photo-input" accept="image/*" onchange="handlePhotoSelect(this)" />
+        <div id="photo-warning" class="photo-warning">⚠️ この形式はブラウザで表示できない場合があります。<br/>JPEGに変換して再度選択してください。</div>
         <div class="photo-preview-wrap">
           <img id="photo-preview" class="photo-preview" alt="プレビュー" />
         </div>
@@ -558,6 +580,7 @@
         保存する
       </button>
       <p class="save-success" id="save-success">✓ 記録しました！</p>
+      <p class="save-error" id="save-error">⚠️ 保存に失敗しました。写真のサイズを小さくするか、古い記録を削除してください。</p>
     </div>
   </div><!-- /screen-record -->
 
@@ -712,21 +735,85 @@ function loadRecords() {
   } catch(e) { return []; }
 }
 function saveRecords(records) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    return true;
+  } catch(e) {
+    console.error('localStorage 保存失敗:', e);
+    return false;
+  }
 }
 
 // ============================================================
 // PHOTO
 // ============================================================
+const ACCEPTED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+const HEIC_TYPES = ['image/heic', 'image/heif'];
+const MAX_WIDTH = 1200;
+const JPEG_QUALITY = 0.8;
+
 function handlePhotoSelect(input) {
   const file = input.files[0];
   if (!file) return;
+
+  const warning = document.getElementById('photo-warning');
+
+  // HEIC/HEIF チェック
+  const lowerName = file.name.toLowerCase();
+  const isHeic = HEIC_TYPES.includes(file.type) ||
+                 lowerName.endsWith('.heic') ||
+                 lowerName.endsWith('.heif');
+  if (isHeic) {
+    warning.classList.add('show');
+    input.value = '';
+    return;
+  } else {
+    warning.classList.remove('show');
+  }
+
+  // 対応形式チェック（JPEG/PNG/WebP）
+  const isAccepted = ACCEPTED_TYPES.includes(file.type) ||
+                     lowerName.endsWith('.jpg') ||
+                     lowerName.endsWith('.jpeg') ||
+                     lowerName.endsWith('.png') ||
+                     lowerName.endsWith('.webp');
+  if (!isAccepted) {
+    showToast('対応していない形式です。JPEG・PNG・WebPを選択してください。');
+    input.value = '';
+    return;
+  }
+
+  // FileReader で読み込み → Canvas で圧縮
   const reader = new FileReader();
   reader.onload = function(e) {
-    photoDataUrl = e.target.result;
-    const preview = document.getElementById('photo-preview');
-    preview.src = photoDataUrl;
-    preview.classList.add('show');
+    const img = new Image();
+    img.onload = function() {
+      // リサイズ計算
+      let w = img.width;
+      let h = img.height;
+      if (w > MAX_WIDTH) {
+        h = Math.round(h * MAX_WIDTH / w);
+        w = MAX_WIDTH;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+
+      // JPEG に変換して保存
+      photoDataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+
+      const preview = document.getElementById('photo-preview');
+      preview.src = photoDataUrl;
+      preview.classList.add('show');
+    };
+    img.onerror = function() {
+      showToast('画像の読み込みに失敗しました。');
+      input.value = '';
+    };
+    img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 }
@@ -755,7 +842,16 @@ function saveRecord() {
 
   const records = loadRecords();
   records.unshift(record);
-  saveRecords(records);
+  const saved = saveRecords(records);
+
+  if (!saved) {
+    // 保存失敗 → エラーメッセージ表示
+    const errMsg = document.getElementById('save-error');
+    errMsg.classList.add('show');
+    setTimeout(() => errMsg.classList.remove('show'), 4000);
+    showToast('⚠️ 保存に失敗しました');
+    return;
+  }
 
   // リセット
   document.getElementById('record-date').value = '';
@@ -763,6 +859,7 @@ function saveRecord() {
   document.getElementById('record-memo').value = '';
   document.getElementById('photo-preview').classList.remove('show');
   document.getElementById('photo-preview').src = '';
+  document.getElementById('photo-warning').classList.remove('show');
   photoDataUrl = null;
   document.getElementById('photo-input').value = '';
 
