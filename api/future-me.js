@@ -3,7 +3,14 @@ import { GoogleGenAI } from '@google/genai';
 // ============================================================
 // Vercel Serverless Function — POST /api/future-me
 // 環境変数: GEMINI_API_KEY
+// 使用モデル: gemini-2.5-flash-lite → gemini-2.5-flash の順に試行
 // ============================================================
+
+// ── モデル試行リスト（上から順に試す）────────────────────────
+const MODELS_TO_TRY = [
+  'gemini-2.5-flash-lite',   // 最軽量・最速（優先）
+  'gemini-2.5-flash',        // フラッシュ標準（次点）
+];
 
 // ── サーバーサイドフォールバック ──────────────────────────────
 // Gemini APIが失敗した場合に、記録内容（メモ・URL）から
@@ -44,7 +51,7 @@ function buildLocalComment(currentEntry) {
   const short = memo.length > 20 ? memo.slice(0, 20) + '…' : memo;
 
   // ════════════════════════════════════════════
-  // 優先度順にキーワードで分岐
+  // 優先度順にキーワードで分岐（12パターン）
   // ════════════════════════════════════════════
 
   // ① クラウドファンディング・挑戦
@@ -65,7 +72,7 @@ function buildLocalComment(currentEntry) {
 
   // ③ 音楽 ─ アーティスト名があれば使う
   const artistMatch = memo.match(
-    /(くるり|シティポップ|jazz|ジャズ|フィッシュマンズ|椎名林檎|サカナクション|きのこ帝国|ヨルシカ|YOASOBI|米津|ビートルズ|Beatles|[a-zA-Zァ-ン一-龠々]{2,8}(バンド|楽団))/i
+    /(くるり|シティポップ|jazz|ジャズ|フィッシュマンズ|椎名林檎|サカナクション|きのこ帝国|ヨルシカ|YOASOBI|米津|ビートルズ|Beatles)/i
   );
   if (artistMatch) {
     return `「${artistMatch[1]}」、今も聴いていますか？最近のお気に入りは変わりましたか？`;
@@ -77,7 +84,7 @@ function buildLocalComment(currentEntry) {
 
   // ④ アニメ・マンガ ─ タイトル名があれば使う
   const animeMatch = memo.match(
-    /(チェーンソーマン|チェインソーマン|鬼滅|進撃の巨人|ワンピース|呪術廻戦|ドラゴンボール|ナルト|ハンターハンター|ブルーロック|推しの子|葬送のフリーレン|スパイファミリー|[ァ-ン一-龠々]{3,12}(?:の伝説|大戦|物語)?)/
+    /(チェーンソーマン|チェインソーマン|鬼滅|進撃の巨人|ワンピース|呪術廻戦|ドラゴンボール|ナルト|ハンターハンター|ブルーロック|推しの子|葬送のフリーレン|スパイファミリー)/
   );
   if (animeMatch && /アニメ|マンガ|漫画|コミック/.test(text)) {
     return `「${animeMatch[1]}」、今も印象に残っている場面はありますか？`;
@@ -119,7 +126,7 @@ function buildLocalComment(currentEntry) {
     return memo ? `「${short}」また行きたいと思いますか？` : 'この場所、また訪れたいですか？';
   }
 
-  // ⑪ 人との出会い・社交（「会」単独は除外、複合語のみ）
+  // ⑪ 人との出会い・社交（複合語のみ。「会」単独は除外）
   if (/友達|友人|知り合い|仲間|出会い|カフェで|展示会|イベントで|飲み会|ランチ|集まり|パーティ|ミートアップ/.test(text)) {
     return 'この時に会った人と、最近もつながっていますか？';
   }
@@ -148,6 +155,34 @@ function buildLocalComment(currentEntry) {
   if (month >= 6  && month <= 8)  return 'この夏の記録、当時何を考えていましたか？';
   if (month >= 9  && month <= 11) return 'この秋の記録、あの頃と今で変わりましたか？';
   return 'この記録、今も気になっていますか？';
+}
+
+// ── Geminiへのコンテンツ生成（モデルを順番に試す）─────────────
+async function tryGenerateContent(ai, modelList, generateConfig) {
+  let lastErr;
+  for (const model of modelList) {
+    try {
+      console.log(`[future-me] trying model: ${model}`);
+      const response = await ai.models.generateContent({
+        model,
+        ...generateConfig,
+      });
+      console.log(`[future-me] model OK: ${model}`);
+      return { response, usedModel: model };
+    } catch (err) {
+      const errMsg = err.message || '';
+      const isNotFound = /not found|404|invalid model|unknown model/i.test(errMsg);
+      console.warn(`[future-me] model "${model}" failed:`, errMsg);
+      lastErr = err;
+      if (isNotFound) {
+        // モデルが存在しない場合は次を試す
+        continue;
+      }
+      // 429 / 500 等モデル以外のエラーは即throw（フォールバックへ）
+      throw err;
+    }
+  }
+  throw lastErr || new Error('All models failed');
 }
 
 // ============================================================
@@ -202,8 +237,7 @@ export default async function handler(req, res) {
 
     console.log('[future-me] prompt:', userPrompt);
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-1.5-flash',
+    const { response, usedModel } = await tryGenerateContent(ai, MODELS_TO_TRY, {
       contents: userPrompt,
       config: {
         systemInstruction,
@@ -211,14 +245,14 @@ export default async function handler(req, res) {
         responseSchema: {
           type: 'object',
           properties: { comment: { type: 'string' } },
-          required: ['comment']
+          required: ['comment'],
         },
         maxOutputTokens: 150,
         temperature: 0.8,
       },
     });
 
-    console.log('[future-me] response.text:', response.text);
+    console.log(`[future-me] response.text (${usedModel}):`, response.text);
 
     let effectiveRaw = (response.text || '').trim();
 
@@ -228,7 +262,7 @@ export default async function handler(req, res) {
         const parts = response?.candidates?.[0]?.content?.parts;
         if (parts && parts.length > 0) {
           effectiveRaw = parts.map(p => p.text || '').join('').trim();
-          console.log('[future-me] candidates fallback:', effectiveRaw);
+          console.log('[future-me] candidates fallback raw:', effectiveRaw);
         }
       } catch (e) {
         console.warn('[future-me] candidates access failed:', e.message);
@@ -244,13 +278,10 @@ export default async function handler(req, res) {
     let comment = null;
     try {
       comment = JSON.parse(effectiveRaw).comment;
-      console.log('[future-me] parsed comment:', comment);
     } catch {
       const match = effectiveRaw.match(/"comment"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (match) {
-        comment = match[1];
-        console.log('[future-me] regex comment:', comment);
-      }
+      if (match) comment = match[1];
+      else console.warn('[future-me] JSON parse failed. raw:', effectiveRaw);
     }
 
     if (!comment || comment.trim() === '') {
@@ -258,19 +289,20 @@ export default async function handler(req, res) {
       throw new Error('Empty comment from Gemini');
     }
 
+    // ✅ 成功ログ
+    console.log('[future-me] Gemini success:', comment.trim());
     return res.status(200).json({ comment: comment.trim() });
 
   } catch (err) {
-    // 429 / 500 / タイムアウト / 空レスポンス → ローカルフォールバック
+    // 429 / 500 / タイムアウト / モデル全滅 → ローカルフォールバック
     const isQuota = /429|RESOURCE_EXHAUSTED|quota/i.test(err.message || '');
     console.warn(
       isQuota
-        ? '[future-me] 429 quota exceeded → local fallback'
+        ? '[future-me] 429 quota → local fallback'
         : '[future-me] API error → local fallback:',
       err.message || err
     );
 
-    // 常に200でフォールバックコメントを返す
     const fallbackComment = buildLocalComment(currentEntry);
     console.log('[future-me] local fallback comment:', fallbackComment);
     return res.status(200).json({ comment: fallbackComment });
