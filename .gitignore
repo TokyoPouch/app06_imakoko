@@ -1,3 +1,5 @@
 .DS_Store
 これにしますindex.html
 ふたつめindex.html
+node_modules/
+package-lock.json

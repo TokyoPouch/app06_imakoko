@@ -848,7 +848,8 @@ function saveRecord() {
     date: date || new Date().toISOString().slice(0,10),
     url,
     memo,
-    photo
+    photo,
+    futureMeLoading: true  // STEP3: AI生成を待機中
   };
 
   const records = loadRecords();
@@ -965,7 +966,11 @@ function renderTimeline() {
 
   records.forEach((rec, idx) => {
     const colorClass = FUTURE_COLORS[idx % FUTURE_COLORS.length];
-    const fmText = generateFutureMe(rec);
+    // STEP3: AI生成済みコメントがあれば使用、ローディング中は待機テキスト、なければフォールバック
+    const isLoading = rec.futureMeLoading === true;
+    const fmText = isLoading
+      ? 'Future Meが考えています…'
+      : (rec.futureMe || generateFutureMe(rec));
     const dateObj = rec.date ? new Date(rec.date + 'T00:00:00') : new Date();
     const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth()+1).padStart(2,'0');
@@ -1010,13 +1015,80 @@ function renderTimeline() {
         <div class="future-me-avatar">${FUTURE_ME_SVG}</div>
         <div class="future-me-content">
           <div class="future-me-label">Future Meからのメッセージ</div>
-          <div class="future-me-text">${escHtml(fmText).replace(/\n/g,'<br/>')}</div>
+          <div class="future-me-text" id="fm-text-${rec.id}">${escHtml(fmText).replace(/\n/g,'<br/>')}</div>
         </div>
       </div>
     `;
 
     container.appendChild(item);
+    // STEP3: ローディング中のカードはAPIを非同期呼び出し
+    if (isLoading) fetchAndUpdateFutureMe(rec.id);
   });
+}
+
+// ============================================================
+// STEP3: FUTURE ME — AI API 呼び出し
+// ============================================================
+
+/**
+ * /api/future-me を呼び出してAIコメントを取得し、
+ * localStorage と DOM を更新する。失敗時はフォールバック。
+ */
+async function fetchAndUpdateFutureMe(recordId) {
+  const allRecords = loadRecords();
+  const rec = allRecords.find(r => r.id === recordId);
+  if (!rec) return;
+
+  // 最新5件（自分自身を除く）を recentEntries として送る
+  const recentEntries = allRecords
+    .filter(r => r.id !== recordId)
+    .slice(0, 5)
+    .map(r => ({ date: r.date, memo: r.memo, url: r.url }));
+
+  const textEl = document.getElementById('fm-text-' + recordId);
+
+  try {
+    const res = await fetch('/api/future-me', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentEntry: { date: rec.date, memo: rec.memo, url: rec.url },
+        recentEntries
+      })
+    });
+
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.comment) throw new Error('No comment in response');
+
+    // localStorage を更新（futureMeLoading削除、futureMe保存）
+    const records = loadRecords();
+    const i = records.findIndex(r => r.id === recordId);
+    if (i !== -1) {
+      records[i].futureMe = data.comment;
+      delete records[i].futureMeLoading;
+      saveRecords(records);
+    }
+
+    // DOM を更新
+    if (textEl) textEl.innerHTML = escHtml(data.comment).replace(/\n/g, '<br/>');
+
+  } catch (err) {
+    console.warn('Future Me API fallback:', err.message || err);
+
+    // フォールバック: 既存キーワードロジックを使用
+    const fallback = generateFutureMe(rec);
+
+    const records = loadRecords();
+    const i = records.findIndex(r => r.id === recordId);
+    if (i !== -1) {
+      records[i].futureMe = fallback;
+      delete records[i].futureMeLoading;
+      saveRecords(records);
+    }
+
+    if (textEl) textEl.innerHTML = escHtml(fallback).replace(/\n/g, '<br/>');
+  }
 }
 
 // ============================================================
