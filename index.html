@@ -591,6 +591,17 @@
     </div>
     <div class="settings-body">
       <div class="settings-section">
+        <h3>バックアップ</h3>
+        <button class="settings-btn" id="btn-export" onclick="exportData()">
+          📤 データを書き出す
+        </button>
+        <label for="import-file-input" class="settings-btn" id="btn-import-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          📥 データを読み込む
+        </label>
+        <input type="file" id="import-file-input" accept=".json,application/json" style="display:none;" onchange="importData(this)" />
+        <p id="import-result" style="font-size:12px;line-height:1.6;margin-top:8px;display:none;"></p>
+      </div>
+      <div class="settings-section">
         <h3>データ管理</h3>
         <button class="settings-btn" onclick="restoreSamples()">サンプルデータを復元</button>
         <button class="settings-btn danger" onclick="confirmDeleteAll()">すべてのデータを削除</button>
@@ -1009,7 +1020,130 @@ function renderTimeline() {
 }
 
 // ============================================================
-// SETTINGS
+// SETTINGS — EXPORT / IMPORT
+// ============================================================
+
+/**
+ * エクスポート: localStorage の全記録を JSON ファイルとしてダウンロード
+ * ファイル名: imakoko_backup_YYYYMMDD.json
+ */
+function exportData() {
+  const records = loadRecords();
+  if (records.length === 0) {
+    showToast('書き出すデータがありません');
+    return;
+  }
+
+  const payload = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    records: records
+  };
+
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+
+  // ファイル名: imakoko_backup_YYYYMMDD.json
+  const now = new Date();
+  const ymd = now.getFullYear().toString()
+    + String(now.getMonth() + 1).padStart(2, '0')
+    + String(now.getDate()).padStart(2, '0');
+  const filename = `imakoko_backup_${ymd}.json`;
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  showToast(`📤 ${filename} を書き出しました`);
+}
+
+/**
+ * インポート: JSON ファイルを読み込み、既存データに追加（上書きなし）
+ */
+function importData(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  const resultEl = document.getElementById('import-result');
+  resultEl.style.display = 'none';
+  resultEl.style.color = '';
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const parsed = JSON.parse(e.target.result);
+
+      // バリデーション: records 配列があるか確認
+      let incoming = [];
+      if (Array.isArray(parsed)) {
+        // records 配列がそのままトップレベルの場合も受け入れる
+        incoming = parsed;
+      } else if (parsed && Array.isArray(parsed.records)) {
+        incoming = parsed.records;
+      } else {
+        throw new Error('records フィールドが見つかりません');
+      }
+
+      if (incoming.length === 0) {
+        showImportResult('読み込むデータが0件でした', false);
+        input.value = '';
+        return;
+      }
+
+      // 既存データとマージ（id 重複は除外して追加）
+      const current = loadRecords();
+      const existingIds = new Set(current.map(r => r.id));
+      const newRecords  = incoming.filter(r => r && r.id && !existingIds.has(r.id));
+
+      if (newRecords.length === 0) {
+        showImportResult('すべてのデータはすでに存在しています（追加なし）', false);
+        input.value = '';
+        return;
+      }
+
+      const merged = [...current, ...newRecords].sort((a, b) => b.id - a.id);
+      const saved  = saveRecords(merged);
+
+      if (!saved) {
+        showImportResult('保存に失敗しました。ストレージ容量を確認してください。', true);
+        input.value = '';
+        return;
+      }
+
+      showImportResult(`✅ ${newRecords.length}件を追加しました`, false);
+      showToast(`📥 ${newRecords.length}件の記録を読み込みました`);
+      input.value = '';
+
+      // タイムラインへ移動して再描画
+      setTimeout(() => goTo('timeline'), 1000);
+
+    } catch (err) {
+      console.error('import error:', err);
+      showImportResult('バックアップファイルを読み込めませんでした', true);
+      input.value = '';
+    }
+  };
+  reader.onerror = function() {
+    showImportResult('バックアップファイルを読み込めませんでした', true);
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function showImportResult(msg, isError) {
+  const el = document.getElementById('import-result');
+  el.textContent = msg;
+  el.style.color  = isError ? '#d93b3b' : 'var(--text-sub)';
+  el.style.display = 'block';
+}
+
+// ============================================================
+// SETTINGS — DELETE / SAMPLES
 // ============================================================
 function confirmDeleteAll() {
   if (confirm('すべてのデータを削除しますか？\nこの操作は元に戻せません。')) {
